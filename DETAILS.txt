@@ -1,0 +1,91 @@
+ZERODHA KITE MCP PORTFOLIO AGENT - IMPLEMENTATION NOTES
+=========================================================
+
+Purpose
+-------
+This repository records the working prototype of an interactive portfolio
+assistant for an Indian retail investor. The primary implementation is
+GPT_MCP.py. It combines Google ADK, LiteLLM using OpenAI GPT-5 Mini, and the
+hosted Zerodha Kite MCP endpoint at https://mcp.kite.trade/mcp.
+
+Working Flow
+------------
+1. dotenv loads OPENAI_API_KEY from the local .env file.
+2. LiteLLM sends agent requests to openai/gpt-5-mini.
+3. Google ADK exposes Kite MCP tools to the agent.
+4. A portfolio request can cause the agent to call Kite's login tool.
+5. The user opens the authorization URL returned by Kite and completes login.
+6. Later requests in the SAME running agent process can call get_positions,
+   get_holdings, margins, quotes, and other available Kite tools.
+
+Important Async Fix
+-------------------
+The original implementation used the synchronous Runner.run() generator inside
+async main(). In google-adk 2.8.0, Runner.run() starts a background thread and
+creates a separate asyncio event loop for each user turn. Kite MCP retains an
+MCP session beyond one turn, so cleanup of that session could happen after the
+per-turn event loop had already closed. The observed message was:
+
+  Error cleaning up session ...: original event loop is closed,
+  resources may be leaked.
+
+GPT_MCP.py now uses:
+
+  async for event in runner.run_async(...):
+
+This keeps all interactive turns on main()'s single, persistent event loop.
+The program also explicitly runs both cleanup operations in a finally block:
+
+  await kite_mcp.close()
+  await runner.close()
+
+This was validated by running a fresh process through login acknowledgement, a
+positions request, and exit. The process exited with code 0 and no closed-event-
+loop MCP cleanup warning.
+
+Observed Successful Result
+--------------------------
+After browser authorization, a current-position query invoked get_positions
+and returned live account data. This demonstrates that the remote Kite MCP
+connection, login session, and tool calls were working.
+
+Warnings And Their Meaning
+--------------------------
+1. "Failed to configure mTLS using AsyncAuthorizedSession: Your default
+   credentials were not found."
+   This is an optional Google Application Default Credentials and mTLS attempt
+   by an ADK dependency. It did not prevent OpenAI or Kite MCP calls and is
+   non-fatal for this application.
+
+2. ADK "[EXPERIMENTAL]" warnings.
+   These identify internal ADK features used by the installed version. They did
+   not prevent tool calls or portfolio responses.
+
+3. LiteLLM "LoggingWorker error" ending in TimeoutError or CancelledError.
+   This is a background remote logging/telemetry callback timing out or being
+   cancelled, often during shutdown. It is separate from the OpenAI model call
+   and Kite tool calls. If unwanted, disable unused LiteLLM callbacks before
+   creating the model:
+
+     import litellm
+     litellm.disable_logging = True
+     litellm.success_callback = []
+     litellm.failure_callback = []
+
+4. UnicodeEncodeError or incorrectly rendered punctuation on Windows.
+   Some Windows terminals use legacy encodings such as ibm437. Run with
+   PYTHONIOENCODING=utf-8 or configure stdout with a suitable error handler.
+
+Exploratory Files
+-----------------
+The test-named Python files are retained as trial-and-error artifacts rather
+than a formal automated test suite. They explore Content construction, model
+configuration, LiteLLM signatures, a Gemini-based agent, direct Kite SSE
+connectivity, and an alternative persistent-toolset approach. GPT_MCP.py is
+the final validated entry point.
+
+Security
+--------
+Only .env.example is safe to commit. The actual .env is ignored because it
+contains OPENAI_API_KEY. Never add API keys, access tokens, or Kite session URLs
+containing active session tokens to Git history.
